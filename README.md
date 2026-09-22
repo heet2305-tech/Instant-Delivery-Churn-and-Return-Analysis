@@ -1,1 +1,133 @@
 # Instant-Delivery-Churn-and-Return-Analysis
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, roc_auc_score
+
+# ==============================================================================
+# 1. EMBEDDED DATASET GENERATOR (500 TRANSACTIONS)
+# ==============================================================================
+def load_embedded_dataset():
+    np.random.seed(42)
+    n_orders = 500
+
+    categories = ['Electronics', 'Apparel', 'Home & Kitchen', 'Beauty & Health', 'Sports & Outdoors']
+    payments = ['Credit Card', 'Debit Card', 'UPI / NetBanking', 'Cash on Delivery']
+    reasons = ['Defective/Damaged', 'Size/Fit Issue', 'Late Delivery', 'Changed Mind', 'Item Not as Pictured']
+
+    order_ids = [f"ORD-{50000 + i}" for i in range(n_orders)]
+    customer_ids = [f"CUST-{1000 + np.random.randint(1, 145)}" for _ in range(n_orders)]
+    dates = [d.strftime('%Y-%m-%d') for d in pd.date_range(start="2025-01-01", end="2025-12-31", periods=n_orders)]
+    cats = list(np.random.choice(categories, n_orders, p=[0.25, 0.35, 0.20, 0.10, 0.10]))
+
+    amounts = []
+    for c in cats:
+        if c == 'Electronics': amounts.append(round(float(np.random.uniform(50, 450)), 2))
+        elif c == 'Apparel': amounts.append(round(float(np.random.uniform(15, 120)), 2))
+        elif c == 'Home & Kitchen': amounts.append(round(float(np.random.uniform(25, 250)), 2))
+        elif c == 'Beauty & Health': amounts.append(round(float(np.random.uniform(10, 90)), 2))
+        else: amounts.append(round(float(np.random.uniform(20, 180)), 2))
+
+    quantities = [int(q) for q in np.random.choice([1, 2, 3, 4, 5], n_orders, p=[0.5, 0.3, 0.1, 0.06, 0.04])]
+    discounts = [float(d) for d in np.random.choice([0.0, 0.05, 0.10, 0.15, 0.20], n_orders, p=[0.4, 0.25, 0.20, 0.10, 0.05])]
+    pay_methods = list(np.random.choice(payments, n_orders, p=[0.4, 0.25, 0.25, 0.10]))
+    delivery_days = [int(d) for d in np.random.choice([2, 3, 4, 5, 6, 7, 8, 9, 10], n_orders, p=[0.1, 0.2, 0.3, 0.2, 0.1, 0.04, 0.03, 0.02, 0.01])]
+
+    returns = []
+    ret_reasons = []
+    for c, d in zip(cats, delivery_days):
+        prob = min(0.22 if c == 'Apparel' else 0.08 + (0.12 if d > 5 else 0), 0.50)
+        ret = int(np.random.binomial(1, prob))
+        returns.append(ret)
+        if ret == 1:
+            if c == 'Apparel':
+                ret_reasons.append(str(np.random.choice(['Size/Fit Issue', 'Item Not as Pictured', 'Defective/Damaged'], p=[0.6, 0.25, 0.15])))
+            elif d > 5:
+                ret_reasons.append(str(np.random.choice(['Late Delivery', 'Changed Mind', 'Defective/Damaged'], p=[0.6, 0.2, 0.2])))
+            else:
+                ret_reasons.append(str(np.random.choice(reasons)))
+        else:
+            ret_reasons.append("None")
+
+    dataset_dict = {
+        'Order_ID': order_ids,
+        'Customer_ID': customer_ids,
+        'Order_Date': dates,
+        'Category': cats,
+        'Order_Amount': amounts,
+        'Quantity': quantities,
+        'Discount_Pct': discounts,
+        'Payment_Method': pay_methods,
+        'Delivery_Days': delivery_days,
+        'Is_Returned': returns,
+        'Return_Reason': ret_reasons
+    }
+
+    return pd.DataFrame(dataset_dict)
+
+# ==============================================================================
+# 2. AGGREGATION & FEATURE ENGINEERING
+# ==============================================================================
+def compute_customer_features(df):
+    df['Order_Date'] = pd.to_datetime(df['Order_Date'])
+    max_date = df['Order_Date'].max() + pd.Timedelta(days=1)
+
+    customer_df = df.groupby('Customer_ID').agg(
+        total_orders=('Order_ID', 'count'),
+        total_spend=('Order_Amount', 'sum'),
+        avg_order_value=('Order_Amount', 'mean'),
+        total_returns=('Is_Returned', 'sum'),
+        return_rate=('Is_Returned', 'mean'),
+        last_order_date=('Order_Date', 'max'),
+        avg_delivery_days=('Delivery_Days', 'mean'),
+        avg_discount=('Discount_Pct', 'mean')
+    ).reset_index()
+
+    customer_df['recency_days'] = (max_date - customer_df['last_order_date']).dt.days
+    customer_df['is_churned'] = np.where(customer_df['recency_days'] > 90, 1, 0)
+
+    return customer_df
+
+# ==============================================================================
+# 3. RANDOM FOREST PREDICTIVE MODEL
+# ==============================================================================
+def train_and_evaluate(customer_df):
+    features = ['total_orders', 'total_spend', 'avg_order_value', 'return_rate', 'avg_delivery_days', 'avg_discount']
+    X = customer_df[features]
+    y = customer_df['is_churned']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+
+    clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    clf.fit(X_train, y_train)
+
+    y_pred = clf.predict(X_test)
+    y_prob = clf.predict_proba(X_test)[:, 1]
+
+    print("\n" + "="*50)
+    print("MODEL PERFORMANCE (RANDOM FOREST)")
+    print("="*50)
+    print(classification_report(y_test, y_pred))
+    print(f"ROC-AUC Score: {roc_auc_score(y_test, y_prob):.4f}")
+
+    importances = pd.Series(clf.feature_importances_, index=features).sort_values(ascending=False)
+    print("\n--- Feature Importance Ranking ---")
+    print(importances)
+
+# ==============================================================================
+# 4. EXECUTION
+# ==============================================================================
+if __name__ == "__main__":
+    df = load_embedded_dataset()
+    customer_df = compute_customer_features(df)
+
+    print("="*50)
+    print("ECOMMERCE CHURN & RETURN ANALYSIS (500 TRANSACTIONS)")
+    print("="*50)
+    print(f"Total Transactions: {len(df)}")
+    print(f"Total Unique Customers: {len(customer_df)}")
+    print(f"Overall Order Return Rate: {df['Is_Returned'].mean():.2%}")
+    print(f"Customer Churn Rate (>90 Days Inactive): {customer_df['is_churned'].mean():.2%}")
+
+    train_and_evaluate(customer_df)
